@@ -11,3 +11,27 @@
 *.json
 **/*.csv
 **/*.json
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets and local config
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Local editor/OS metadata
+.DS_Store
+.vscode/
+.idea/
+
+# Logs and local caches
+*.log
+.pytest_cache/
+.mypy_cache/
+
+# Optional: local Cursor metadata
+.cursor/
