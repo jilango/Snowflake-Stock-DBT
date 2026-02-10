@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -39,11 +41,33 @@ def fetch_page(start: int, count: int, max_retries: int = 4) -> list[dict[str, A
             request = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            result = payload.get("finance", {}).get("result", [])
+            finance = payload.get("finance")
+            if not isinstance(finance, dict):
+                raise RuntimeError("Unexpected Yahoo response: missing 'finance' object")
+
+            result = finance.get("result", [])
+            if not isinstance(result, list):
+                raise RuntimeError("Unexpected Yahoo response: 'result' is not a list")
             if not result:
                 return []
-            return result[0].get("quotes", [])
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+
+            first_result = result[0]
+            if not isinstance(first_result, dict):
+                raise RuntimeError("Unexpected Yahoo response: first result is not an object")
+            quotes = first_result.get("quotes", [])
+            if not isinstance(quotes, list):
+                raise RuntimeError("Unexpected Yahoo response: 'quotes' is not a list")
+            return quotes
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if attempt == max_retries - 1:
+                break
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            if exc.code == 429 and retry_after and retry_after.isdigit():
+                time.sleep(float(retry_after))
+            else:
+                time.sleep(1.5 * (2**attempt))
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
             last_error = exc
             if attempt == max_retries - 1:
                 break
@@ -58,7 +82,10 @@ def to_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            return None
+        return parsed
     except (TypeError, ValueError):
         return None
 
@@ -97,11 +124,21 @@ def collect_most_actives() -> list[dict[str, Any]]:
     scraped_at = datetime.now(UTC).isoformat()
     records: list[dict[str, Any]] = []
     seen_symbols: set[str] = set()
+    start = 0
+    pages_seen = 0
+    max_pages = 20
+    consecutive_empty_pages = 0
 
-    for start in range(0, TARGET_ROW_COUNT, PAGE_SIZE):
+    while len(records) < TARGET_ROW_COUNT and pages_seen < max_pages:
         page_quotes = fetch_page(start=start, count=PAGE_SIZE)
+        pages_seen += 1
+        start += PAGE_SIZE
         if not page_quotes:
+            consecutive_empty_pages += 1
+            if consecutive_empty_pages >= 2:
+                break
             continue
+        consecutive_empty_pages = 0
         for quote in page_quotes:
             symbol = quote.get("symbol")
             if not symbol or symbol in seen_symbols:
@@ -110,8 +147,6 @@ def collect_most_actives() -> list[dict[str, Any]]:
             seen_symbols.add(symbol)
             if len(records) >= TARGET_ROW_COUNT:
                 break
-        if len(records) >= TARGET_ROW_COUNT:
-            break
 
     return records[:TARGET_ROW_COUNT]
 
