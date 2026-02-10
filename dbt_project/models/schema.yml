@@ -1,3 +1,75 @@
 version: 2
 
-models: []
+sources:
+  - name: raw
+    description: Raw Yahoo most-actives ingestion tables loaded from scraper outputs.
+    database: STOCK_PIPELINE_DB
+    schema: RAW
+    tables:
+      - name: most_actives_raw
+        description: File-shaped raw ingestion table for most-actives rows.
+
+models:
+  - name: stg_most_actives
+    description: Standardized staging model that renames fields, casts datatypes, and preserves source metadata.
+    columns:
+      - name: observation_sk
+        description: Hash key representing one entity observation at a specific scrape timestamp.
+        tests:
+          - not_null
+          - unique
+      - name: entity_sk
+        description: Hash key representing an entity grain based on symbol, name, and exchange.
+        tests:
+          - not_null
+      - name: symbol
+        description: Public trading ticker symbol.
+        tests:
+          - not_null
+      - name: scraped_at
+        description: UTC timestamp captured during scraping.
+        tests:
+          - not_null
+
+  - name: dim_entity
+    description: Deduplicated entity dimension with one latest record per entity.
+    columns:
+      - name: entity_sk
+        description: Surrogate key for entity dimension records.
+        tests:
+          - not_null
+          - unique
+      - name: symbol
+        description: Trading ticker used for reporting and joins.
+        tests:
+          - not_null
+      - name: entity_name
+        description: Company name associated with the symbol.
+        tests:
+          - not_null
+
+  - name: fct_observations
+    description: Fact table of stock observations with numeric metrics by scrape date.
+    columns:
+      - name: observation_sk
+        description: Unique identifier for each observed entity snapshot.
+        tests:
+          - not_null
+          - unique
+      - name: entity_sk
+        description: Foreign key to dim_entity for star-schema joins.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_entity')
+              field: entity_sk
+      - name: observation_date
+        description: Date grain for time-series analysis.
+        tests:
+          - not_null
+      - name: price
+        description: Regular market price at scrape time.
+      - name: market_cap
+        description: Market capitalization value at scrape time.
+      - name: volume
+        description: Regular market volume at scrape time.
