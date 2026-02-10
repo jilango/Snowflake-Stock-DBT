@@ -7,11 +7,6 @@ Mini pipeline for stock analytics:
 - run stakeholder analytics SQL
 - trigger filtered analytics through a Streamlit UI
 
-## Dataset Source
-
-- Yahoo Finance Most Actives:
-  `https://finance.yahoo.com/research-hub/screener/most_actives?start=0&count=100`
-
 ## Project Structure
 
 - `scraper/` - scraping script and scraper dependencies
