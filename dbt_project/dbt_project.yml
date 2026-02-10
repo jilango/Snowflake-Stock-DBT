@@ -1,0 +1,17 @@
+name: stock_pipeline
+version: "1.0.0"
+config-version: 2
+
+profile: stock_pipeline
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+analysis-paths: ["analysis"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"

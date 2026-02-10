@@ -1,0 +1,1 @@
+-- Phase 2: create raw and clean Snowflake tables here.
