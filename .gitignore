@@ -1,0 +1,13 @@
+# Ignore all markdown files by default
+*.md
+**/*.md
+
+# Keep required markdown deliverables
+!README.md
+!analysis_answers.md
+
+# Ignore all CSV and JSON files
+*.csv
+*.json
+**/*.csv
+**/*.json
