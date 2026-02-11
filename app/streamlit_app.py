@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,8 @@ except Exception:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OFFLINE_DATA_PATH = PROJECT_ROOT / "raw_data.csv"
-MAX_ROWS = 20
+DEFAULT_ROW_LIMIT = 20
+SCRAPER_SCRIPT_PATH = PROJECT_ROOT / "scraper" / "scrape.py"
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,7 @@ def apply_filters(
     location: str,
     metric_name: str,
     min_threshold: float,
+    row_limit: int | None,
 ) -> pd.DataFrame:
     filtered = df.copy()
     if category != "All":
@@ -150,7 +154,9 @@ def apply_filters(
         filtered = filtered[filtered["location"] == location]
     filtered = filtered[filtered[metric_name].fillna(0) >= min_threshold]
     filtered = filtered.sort_values(by=metric_name, ascending=False)
-    return filtered.head(MAX_ROWS)
+    if row_limit is None:
+        return filtered
+    return filtered.head(row_limit)
 
 
 def build_summary_text(results: pd.DataFrame) -> str:
@@ -170,6 +176,29 @@ def summarize_results_with_llm(api_key: str, results: pd.DataFrame) -> str:
     # Demo-only placeholder: replace with provider SDK/API call in production.
     _ = api_key
     return build_summary_text(results)
+
+
+def run_scraper_and_rebuild() -> tuple[bool, str]:
+    if not SCRAPER_SCRIPT_PATH.exists():
+        return False, f"Scraper script not found: {SCRAPER_SCRIPT_PATH}"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(SCRAPER_SCRIPT_PATH)],
+            cwd=str(PROJECT_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:
+        return False, f"Failed to execute scraper: {exc}"
+
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    details = "\n".join(part for part in [stdout, stderr] if part)
+    if completed.returncode != 0:
+        return False, details or "Scraper failed with a non-zero exit code."
+    return True, details or "Scraper completed and raw files were rebuilt."
 
 
 def render_connection_section() -> tuple[str, SnowflakeConfig]:
@@ -218,9 +247,32 @@ def get_dataset(mode: str, sf_config: SnowflakeConfig) -> tuple[pd.DataFrame, st
 
 def main() -> None:
     st.set_page_config(page_title="Stock Analytics Trigger UI", layout="wide")
-    st.title("Stock Analytics Trigger UI")
-    st.caption("Filter transformed stock observations and run quick analytics.")
+    st.title("Stock Analytics Query Console")
+    st.caption("Run market-data filters, refresh pipelines, and summarize result sets.")
+    st.divider()
 
+    st.subheader("Section 1: Local Raw Data Refresh")
+    st.caption(
+        "Re-run the scraper from the app to rebuild local `raw_data.csv` and `raw_data.json`."
+    )
+    if st.button("Run Scraper and Rebuild Raw Files"):
+        with st.spinner("Running scraper..."):
+            ok, message = run_scraper_and_rebuild()
+        if ok:
+            st.cache_data.clear()
+            st.session_state["results_df"] = pd.DataFrame()
+            st.success("Scraper completed. Local raw files were refreshed.")
+            if message:
+                st.code(message)
+            st.rerun()
+        else:
+            st.error("Scraper run failed. Check details below.")
+            if message:
+                st.code(message)
+    st.divider()
+
+    st.subheader("Section 2: Data Source Mode")
+    st.caption("Choose Offline, Auto, or Snowflake mode from the sidebar.")
     mode, sf_config = render_connection_section()
 
     try:
@@ -236,10 +288,17 @@ def main() -> None:
         )
     else:
         st.success("Connected to Snowflake analytics tables.")
+        if st.button("Update Snowflake Data"):
+            st.cache_data.clear()
+            st.session_state["results_df"] = pd.DataFrame()
+            st.success("Refreshing Snowflake dataset...")
+            st.rerun()
 
+    st.subheader("Section 3: Query Workspace")
+    st.caption("Set filters, run query, review top results, and export/chart in one place.")
     categories, locations = get_filter_options(data)
     metric_name = st.selectbox("Metric", ["market_cap", "volume", "price"], index=0)
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         category = st.selectbox("Category / Sector / Type", ["All", *categories], index=0)
     with col2:
@@ -251,39 +310,72 @@ def main() -> None:
             value=0.0,
             step=1.0,
         )
+    with col4:
+        row_limit_option = st.selectbox(
+            "Result row limit",
+            ["5", "10", "20", "50", "100", "200", "All"],
+            index=2,
+        )
+
+    selected_row_limit: int | None = None
+    if row_limit_option != "All":
+        selected_row_limit = int(row_limit_option)
 
     run_query = st.button("Run Query", type="primary")
     if "results_df" not in st.session_state:
         st.session_state["results_df"] = pd.DataFrame()
+    if "results_seeded" not in st.session_state:
+        st.session_state["results_df"] = apply_filters(
+            data,
+            category="All",
+            location="All",
+            metric_name="market_cap",
+            min_threshold=0.0,
+            row_limit=DEFAULT_ROW_LIMIT,
+        )
+        st.session_state["results_seeded"] = True
     if run_query:
         st.session_state["results_df"] = apply_filters(
-            data, category, location, metric_name, min_threshold
+            data,
+            category,
+            location,
+            metric_name,
+            min_threshold,
+            selected_row_limit,
         )
 
     results = st.session_state["results_df"]
-    st.subheader("Top 20 Results")
+    st.markdown("#### Query Results")
     st.dataframe(results, use_container_width=True)
+    st.caption(
+        "Note: CSV can be downloaded from the table menu in the top-right corner."
+    )
 
     if not results.empty:
-        csv_bytes = results.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Export Results to CSV",
-            data=csv_bytes,
-            file_name="query_results_top20.csv",
-            mime="text/csv",
-        )
-        chart = px.bar(
-            results,
-            x="symbol",
-            y=metric_name,
-            hover_data=["entity_name", "category", "location"],
-            title=f"Top results by {metric_name}",
-        )
+        st.markdown("#### Visualization")
+        chart_type = st.selectbox("Chart type", ["Bar", "Line"], index=0)
+        if chart_type == "Line":
+            chart = px.line(
+                results,
+                x="symbol",
+                y=metric_name,
+                markers=True,
+                hover_data=["entity_name", "category", "location"],
+                title=f"Top results by {metric_name} (Line)",
+            )
+        else:
+            chart = px.bar(
+                results,
+                x="symbol",
+                y=metric_name,
+                hover_data=["entity_name", "category", "location"],
+                title=f"Top results by {metric_name} (Bar)",
+            )
         st.plotly_chart(chart, use_container_width=True)
     else:
         st.warning("No results yet. Click 'Run Query' to execute with current filters.")
 
-    st.subheader("Summarize Results with LLM")
+    st.subheader("Section 6: LLM Summary (Demo)")
     st.warning(
         "Demo only: entering API keys directly in the UI is not secure and "
         "must not be used in production."
