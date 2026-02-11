@@ -79,7 +79,28 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         )
     normalized["category"] = normalized["category"].fillna("Unknown")
     normalized["location"] = normalized["location"].fillna("Unknown")
+    normalized["market_cap_category"] = pd.cut(
+        normalized["market_cap"],
+        bins=[-float("inf"), 2_000_000_000, 10_000_000_000, float("inf")],
+        labels=["Small", "Mid", "Large"],
+    ).astype("object")
+    normalized["market_cap_category"] = normalized["market_cap_category"].fillna("Unknown")
     return normalized
+
+
+def ensure_market_cap_category(df: pd.DataFrame) -> pd.DataFrame:
+    ensured = df.copy()
+    if "market_cap" not in ensured.columns:
+        ensured["market_cap"] = pd.NA
+    if "market_cap_category" not in ensured.columns:
+        ensured["market_cap"] = pd.to_numeric(ensured["market_cap"], errors="coerce")
+        ensured["market_cap_category"] = pd.cut(
+            ensured["market_cap"],
+            bins=[-float("inf"), 2_000_000_000, 10_000_000_000, float("inf")],
+            labels=["Small", "Mid", "Large"],
+        ).astype("object")
+        ensured["market_cap_category"] = ensured["market_cap_category"].fillna("Unknown")
+    return ensured
 
 
 @st.cache_data(show_spinner=False)
@@ -133,30 +154,53 @@ def load_snowflake_data(config_dict: dict[str, str]) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def get_filter_options(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    categories = sorted(v for v in df["category"].dropna().astype(str).unique() if v)
-    locations = sorted(v for v in df["location"].dropna().astype(str).unique() if v)
-    return categories, locations
+def get_filter_options(df: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
+    prepared = ensure_market_cap_category(df)
+    categories = sorted(v for v in prepared["category"].dropna().astype(str).unique() if v)
+    locations = sorted(v for v in prepared["location"].dropna().astype(str).unique() if v)
+    market_cap_categories = sorted(
+        v for v in prepared["market_cap_category"].dropna().astype(str).unique() if v
+    )
+    return categories, locations, market_cap_categories
 
 
 def apply_filters(
     df: pd.DataFrame,
     category: str,
     location: str,
+    market_cap_category: str,
     metric_name: str,
     min_threshold: float,
     row_limit: int | None,
 ) -> pd.DataFrame:
-    filtered = df.copy()
+    filtered = ensure_market_cap_category(df)
     if category != "All":
         filtered = filtered[filtered["category"] == category]
     if location != "All":
         filtered = filtered[filtered["location"] == location]
+    if market_cap_category != "All":
+        filtered = filtered[filtered["market_cap_category"] == market_cap_category]
     filtered = filtered[filtered[metric_name].fillna(0) >= min_threshold]
     filtered = filtered.sort_values(by=metric_name, ascending=False)
     if row_limit is None:
         return filtered
     return filtered.head(row_limit)
+
+
+def compute_liquidity_shocks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "volume" not in df.columns:
+        return pd.DataFrame(columns=["symbol", "entity_name", "volume", "volume_z_score"])
+
+    work = df.copy()
+    work["volume"] = pd.to_numeric(work["volume"], errors="coerce")
+    mean_volume = work["volume"].mean()
+    std_volume = work["volume"].std()
+    if pd.isna(std_volume) or std_volume == 0:
+        return pd.DataFrame(columns=["symbol", "entity_name", "volume", "volume_z_score"])
+
+    work["volume_z_score"] = (work["volume"] - mean_volume) / std_volume
+    shocks = work[work["volume_z_score"] > 2].sort_values("volume_z_score", ascending=False)
+    return shocks[["symbol", "entity_name", "volume", "volume_z_score"]]
 
 
 def build_summary_text(results: pd.DataFrame) -> str:
@@ -246,71 +290,84 @@ def get_dataset(mode: str, sf_config: SnowflakeConfig) -> tuple[pd.DataFrame, st
 
 
 def main() -> None:
-    st.set_page_config(page_title="Stock Analytics Trigger UI", layout="wide")
-    st.title("Stock Analytics Query Console")
+    st.set_page_config(
+        page_title="Market Activity & Risk Intelligence Dashboard – Most Actives",
+        layout="wide",
+    )
+    st.title("Market Activity & Risk Intelligence Dashboard – Most Actives")
     st.caption("Run market-data filters, refresh pipelines, and summarize result sets.")
     st.divider()
 
-    st.subheader("Section 1: Local Raw Data Refresh")
-    st.caption(
-        "Re-run the scraper from the app to rebuild local `raw_data.csv` and `raw_data.json`."
-    )
-    if st.button("Run Scraper and Rebuild Raw Files"):
-        with st.spinner("Running scraper..."):
-            ok, message = run_scraper_and_rebuild()
-        if ok:
-            st.cache_data.clear()
-            st.session_state["results_df"] = pd.DataFrame()
-            st.success("Scraper completed. Local raw files were refreshed.")
-            if message:
-                st.code(message)
-            st.rerun()
-        else:
-            st.error("Scraper run failed. Check details below.")
-            if message:
-                st.code(message)
-    st.divider()
-
-    st.subheader("Section 2: Data Source Mode")
-    st.caption("Choose Offline, Auto, or Snowflake mode from the sidebar.")
-    mode, sf_config = render_connection_section()
-
-    try:
-        data, active_mode = get_dataset(mode, sf_config)
-    except Exception as exc:
-        st.error(str(exc))
-        st.stop()
-
-    if active_mode == "offline":
-        st.info(
-            "Offline mode active: using local snapshot data. "
-            "Results may not reflect latest warehouse state."
+    top_col1, top_col2 = st.columns(2, gap="large")
+    with top_col1:
+        st.subheader("Section 1: Local Raw Data Refresh")
+        st.caption(
+            "Re-run the scraper from the app to rebuild local `raw_data.csv` and `raw_data.json`."
         )
-    else:
-        st.success("Connected to Snowflake analytics tables.")
-        if st.button("Update Snowflake Data"):
-            st.cache_data.clear()
-            st.session_state["results_df"] = pd.DataFrame()
-            st.success("Refreshing Snowflake dataset...")
-            st.rerun()
+        if st.button("Run Scraper and Rebuild Raw Files"):
+            with st.spinner("Running scraper..."):
+                ok, message = run_scraper_and_rebuild()
+            if ok:
+                st.cache_data.clear()
+                st.session_state["results_df"] = pd.DataFrame()
+                st.success("Scraper completed. Local raw files were refreshed.")
+                if message:
+                    st.code(message)
+                st.rerun()
+            else:
+                st.error("Scraper run failed. Check details below.")
+                if message:
+                    st.code(message)
+
+    with top_col2:
+        st.subheader("Section 2: Data Source Mode")
+        st.caption("Choose Offline, Auto, or Snowflake mode from the sidebar.")
+        mode, sf_config = render_connection_section()
+
+        try:
+            data, active_mode = get_dataset(mode, sf_config)
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
+
+        if active_mode == "offline":
+            st.info(
+                "Offline mode active: using local snapshot data. "
+                "Results may not reflect latest warehouse state."
+            )
+        else:
+            st.success("Connected to Snowflake analytics tables.")
+            if st.button("Update Snowflake Data"):
+                st.cache_data.clear()
+                st.session_state["results_df"] = pd.DataFrame()
+                st.success("Refreshing Snowflake dataset...")
+                st.rerun()
+
+    st.divider()
 
     st.subheader("Section 3: Query Workspace")
     st.caption("Set filters, run query, review top results, and export/chart in one place.")
-    categories, locations = get_filter_options(data)
+    categories, locations, market_cap_categories = get_filter_options(data)
     metric_name = st.selectbox("Metric", ["market_cap", "volume", "price"], index=0)
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         category = st.selectbox("Category / Sector / Type", ["All", *categories], index=0)
     with col2:
         location = st.selectbox("Location / Country", ["All", *locations], index=0)
     with col3:
+        market_cap_category = st.selectbox(
+            "Market Cap Category",
+            ["All", *market_cap_categories],
+            index=0,
+        )
+    with col4:
         min_threshold = st.number_input(
             f"Minimum {metric_name}",
             min_value=0.0,
             value=0.0,
             step=1.0,
         )
-    with col4:
+    with col5:
         row_limit_option = st.selectbox(
             "Result row limit",
             ["5", "10", "20", "50", "100", "200", "All"],
@@ -329,6 +386,7 @@ def main() -> None:
             data,
             category="All",
             location="All",
+            market_cap_category="All",
             metric_name="market_cap",
             min_threshold=0.0,
             row_limit=DEFAULT_ROW_LIMIT,
@@ -339,12 +397,51 @@ def main() -> None:
             data,
             category,
             location,
+            market_cap_category,
             metric_name,
             min_threshold,
             selected_row_limit,
         )
 
     results = st.session_state["results_df"]
+    insight_source = results if not results.empty else data
+    total_market_volume = (
+        pd.to_numeric(insight_source["volume"], errors="coerce").fillna(0).sum()
+    )
+    top5_volume = (
+        insight_source.sort_values("volume", ascending=False)[["symbol", "entity_name", "volume"]]
+        .head(5)
+        .reset_index(drop=True)
+    )
+    liquidity_shocks = compute_liquidity_shocks(insight_source)
+    top_volume_symbol = top5_volume.iloc[0]["symbol"] if not top5_volume.empty else "N/A"
+    liquidity_shock_count = len(liquidity_shocks)
+
+    with st.container(border=True):
+        st.markdown("#### Stakeholder Insights")
+        st.caption("Computed from the current filtered result set.")
+        kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+
+        with kpi_col1:
+            st.metric("Total Market Volume", f"{total_market_volume:,.0f}")
+        with kpi_col2:
+            st.metric("Liquidity Shock Count", f"{liquidity_shock_count}")
+        with kpi_col3:
+            st.metric("Top Volume Symbol", str(top_volume_symbol))
+
+        insight_tab1, insight_tab2 = st.tabs(["Top 5 by Volume", "Liquidity Shocks"])
+        with insight_tab1:
+            st.dataframe(top5_volume, use_container_width=True, hide_index=True)
+        with insight_tab2:
+            if liquidity_shocks.empty:
+                st.info("No liquidity shocks detected.")
+            else:
+                st.dataframe(
+                    liquidity_shocks,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
     st.markdown("#### Query Results")
     st.dataframe(results, use_container_width=True)
     st.caption(

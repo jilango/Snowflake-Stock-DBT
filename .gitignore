@@ -4,7 +4,6 @@
 
 # Keep required markdown deliverables
 !README.md
-!analysis_answers.md
 
 # Ignore all CSV and JSON files
 *.csv
